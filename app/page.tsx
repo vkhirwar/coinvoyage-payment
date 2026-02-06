@@ -184,6 +184,7 @@ export default function PaymentPage() {
               <PayButton
                 intent="Pay With Crypto"
                 toChain={ChainId.SUI}
+                toToken={null as any} // SDK bug: omitting toToken passes undefined, but internal zod validator requires null for native tokens
                 toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
                 toAmount={parseFloat(total.toFixed(2))}
                 style={{
