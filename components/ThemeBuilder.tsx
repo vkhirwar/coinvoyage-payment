@@ -803,7 +803,7 @@ export default function ThemeBuilder() {
                           intent="Pay With Crypto"
                           toChain={ChainId.SUI}
                           toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
-                          toAmount="9.99"
+                          toAmount={9.99}
                         />
                       </div>
                     </div>
@@ -835,7 +835,7 @@ export default function ThemeBuilder() {
                               intent="Pay Now"
                               toChain={ChainId.SUI}
                               toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
-                              toAmount="19.99"
+                              toAmount={19.99}
                             />
                           </div>
                           <div className="text-center">
@@ -844,7 +844,7 @@ export default function ThemeBuilder() {
                               intent="Checkout"
                               toChain={ChainId.SUI}
                               toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
-                              toAmount="49.99"
+                              toAmount={49.99}
                             />
                           </div>
                           <div className="text-center">
@@ -853,7 +853,7 @@ export default function ThemeBuilder() {
                               intent="Donate"
                               toChain={ChainId.SUI}
                               toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
-                              toAmount="5.00"
+                              toAmount={5.00}
                             />
                           </div>
                         </div>

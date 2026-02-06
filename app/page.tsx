@@ -185,7 +185,7 @@ export default function PaymentPage() {
                 intent="Pay With Crypto"
                 toChain={ChainId.SUI}
                 toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
-                toAmount={total.toFixed(2)}
+                toAmount={parseFloat(total.toFixed(2))}
                 style={{
                   width: "100%",
                   padding: "16px",
