@@ -802,6 +802,7 @@ export default function ThemeBuilder() {
                         <PayButton
                           intent="Pay With Crypto"
                           toChain={ChainId.SUI}
+                          toToken={null as any}
                           toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
                           toAmount={9.99}
                         />
@@ -834,6 +835,7 @@ export default function ThemeBuilder() {
                             <PayButton
                               intent="Pay Now"
                               toChain={ChainId.SUI}
+                              toToken={null as any}
                               toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
                               toAmount={19.99}
                             />
@@ -843,6 +845,7 @@ export default function ThemeBuilder() {
                             <PayButton
                               intent="Checkout"
                               toChain={ChainId.SUI}
+                              toToken={null as any}
                               toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
                               toAmount={49.99}
                             />
@@ -852,6 +855,7 @@ export default function ThemeBuilder() {
                             <PayButton
                               intent="Donate"
                               toChain={ChainId.SUI}
+                              toToken={null as any}
                               toAddress="0x7b8e0864967427679b4e129f79dc332a885c6087ec9e187b53451a9006ee15f2"
                               toAmount={5.00}
                             />
