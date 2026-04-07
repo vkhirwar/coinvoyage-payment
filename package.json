@@ -9,8 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@coin-voyage/paykit": "^2.0.0",
-    "@tanstack/react-query": "^5.90.16",
+    "@coin-voyage/crypto": "^2.2.3",
+    "@coin-voyage/paykit": "^2.4.0",
+    "@coin-voyage/shared": "^2.2.5",
+    "@tanstack/react-query": "^5.95.2",
     "next": "16.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3"

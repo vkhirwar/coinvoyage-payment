@@ -2,7 +2,7 @@
 
 import { PayKitProvider, WalletProvider } from "@coin-voyage/paykit";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createContext, useContext, useState, useEffect } from "react";
+import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { ThemeProvider, useTheme } from "@/components/ThemeContext";
 import ThemeTrigger from "@/components/ThemeTrigger";
 
@@ -19,6 +19,26 @@ const WalletReadyContext = createContext(false);
 
 export function useWalletReady() {
   return useContext(WalletReadyContext);
+}
+
+interface ApiKeyContextType {
+  apiKey: string;
+  secretKey: string;
+  setApiKey: (key: string) => void;
+  setSecretKey: (key: string) => void;
+  isAuthenticated: boolean;
+}
+
+const ApiKeyContext = createContext<ApiKeyContextType>({
+  apiKey: "",
+  secretKey: "",
+  setApiKey: () => {},
+  setSecretKey: () => {},
+  isAuthenticated: false,
+});
+
+export function useApiKeys() {
+  return useContext(ApiKeyContext);
 }
 
 function HideTrustWallet() {
@@ -53,14 +73,14 @@ function HideTrustWallet() {
 // Inner component that uses the theme context
 function ThemedPayKitProvider({ children }: { children: React.ReactNode }) {
   const { theme, mode, customTheme, isHydrated } = useTheme();
-  const apiKey = process.env.NEXT_PUBLIC_COIN_VOYAGE_API_KEY;
-
-  if (!apiKey) {
-    throw new Error("NEXT_PUBLIC_COIN_VOYAGE_API_KEY is required");
-  }
+  const { apiKey } = useApiKeys();
 
   // Wait for hydration to avoid mismatch
   if (!isHydrated) {
+    return <>{children}</>;
+  }
+
+  if (!apiKey) {
     return <>{children}</>;
   }
 
@@ -90,6 +110,50 @@ function WalletProviders({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ApiKeyProvider({ children }: { children: React.ReactNode }) {
+  const [apiKey, setApiKeyState] = useState("");
+  const [secretKey, setSecretKeyState] = useState("");
+
+  useEffect(() => {
+    const storedApiKey = localStorage.getItem("cv_api_key") || process.env.NEXT_PUBLIC_COIN_VOYAGE_API_KEY || "";
+    const storedSecretKey = localStorage.getItem("cv_secret_key") || "";
+    setApiKeyState(storedApiKey);
+    setSecretKeyState(storedSecretKey);
+  }, []);
+
+  const setApiKey = useCallback((key: string) => {
+    setApiKeyState(key);
+    if (key) {
+      localStorage.setItem("cv_api_key", key);
+    } else {
+      localStorage.removeItem("cv_api_key");
+    }
+  }, []);
+
+  const setSecretKey = useCallback((key: string) => {
+    setSecretKeyState(key);
+    if (key) {
+      localStorage.setItem("cv_secret_key", key);
+    } else {
+      localStorage.removeItem("cv_secret_key");
+    }
+  }, []);
+
+  return (
+    <ApiKeyContext.Provider
+      value={{
+        apiKey,
+        secretKey,
+        setApiKey,
+        setSecretKey,
+        isAuthenticated: !!apiKey && !!secretKey,
+      }}
+    >
+      {children}
+    </ApiKeyContext.Provider>
+  );
+}
+
 export function Providers({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
 
@@ -101,13 +165,15 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
-        {mounted ? (
-          <WalletProviders>{children}</WalletProviders>
-        ) : (
-          <WalletReadyContext.Provider value={false}>
-            {children}
-          </WalletReadyContext.Provider>
-        )}
+        <ApiKeyProvider>
+          {mounted ? (
+            <WalletProviders>{children}</WalletProviders>
+          ) : (
+            <WalletReadyContext.Provider value={false}>
+              {children}
+            </WalletReadyContext.Provider>
+          )}
+        </ApiKeyProvider>
       </ThemeProvider>
     </QueryClientProvider>
   );
