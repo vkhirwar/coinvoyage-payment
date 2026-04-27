@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import "./theme-vars.css";
 import { Providers } from "./providers";
+import { THEME_INIT_SCRIPT } from "./swap/components/theme";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -25,6 +27,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Sets data-theme on <html> before React hydrates so light-mode users
+            don't flash dark on initial paint. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

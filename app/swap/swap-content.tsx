@@ -1,11 +1,24 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useApiKeys, useWalletReady } from "../providers";
-import { useAccount, usePrepareTransaction, useInstalledWallets, useUniversalConnect } from "@coin-voyage/crypto/hooks";
+import { useAccount, useAccountDisconnect, usePrepareTransaction } from "@coin-voyage/crypto/hooks";
 import { ChainType } from "@coin-voyage/shared/types";
 import { useSwitchChain } from "wagmi";
+import TokenChainPicker, { type PickerToken, TokenIcon } from "./components/TokenChainPicker";
+import { VS } from "./components/theme";
+import ThemeToggle from "./components/ThemeToggle";
+import WalletSidebar from "./components/WalletSidebar";
+import WalletConnectModal from "./components/WalletConnectModal";
+import RecipientDropdown from "./components/RecipientDropdown";
+import RouteSummary from "./components/RouteSummary";
+import TransactionFlowModal from "./components/TransactionFlowModal";
+
+// How long a quote stays "fresh" before we silently re-fetch.
+const QUOTE_TTL_MS = 30_000;
+// Debounce window for input-change auto-quotes.
+const QUOTE_DEBOUNCE_MS = 500;
 
 // Chain definitions with display info
 const CHAINS = [
@@ -25,10 +38,13 @@ const CHAINS = [
 ] as const;
 
 // Common tokens per chain (address undefined = native token)
-const POPULAR_TOKENS: Record<
-  number,
-  { name: string; ticker: string; address?: string }[]
-> = {
+type TokenInfo = {
+  name: string;
+  ticker: string;
+  address?: string;
+  uiAmount?: number; // present when sourced from wallet balances
+};
+const POPULAR_TOKENS: Record<number, TokenInfo[]> = {
   1: [
     { name: "Ethereum", ticker: "ETH" },
     { name: "USDC", ticker: "USDC", address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" },
@@ -176,6 +192,46 @@ function isCrossChain(srcChainId: number, dstChainId: number): boolean {
   return srcChainId !== dstChainId;
 }
 
+// Chains that show in "Starred Chains" section of the picker.
+const STARRED_CHAIN_IDS = [8453, 1, 42161, 10, 137, 30000000000001];
+
+// TODO: replace with final Vaporswap logo
+function VaporswapLogo({ size = 32 }: { size?: number }) {
+  return (
+    <Link href="/swap" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
+      <svg width={size} height={size} viewBox="0 0 40 40" fill="none" aria-label="Vaporswap">
+        <defs>
+          <linearGradient id="vs-logo-grad" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stopColor="#7c5cff" />
+            <stop offset="0.5" stopColor="#4fd1ff" />
+            <stop offset="1" stopColor="#ff5cf1" />
+          </linearGradient>
+        </defs>
+        <rect x="1" y="1" width="38" height="38" rx="10" fill="url(#vs-logo-grad)" />
+        <path
+          d="M10 14c3 0 4 5 7 5s4-5 7-5 4 5 7 5M10 22c3 0 4 5 7 5s4-5 7-5 4 5 7 5"
+          stroke="#fff"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity="0.95"
+        />
+      </svg>
+      <span
+        style={{
+          fontSize: 18,
+          fontWeight: 700,
+          letterSpacing: -0.3,
+          color: VS.text,
+          fontFeatureSettings: '"ss01"',
+        }}
+      >
+        Vaporswap
+      </span>
+    </Link>
+  );
+}
+
 function getChainType(chainId: number): ChainType {
   if (chainId === 30000000000001) return ChainType.SOL;
   if (chainId === 30000000000002) return ChainType.SUI;
@@ -200,14 +256,26 @@ export default function SwapContent() {
 function SwapContentInner() {
   const { apiKey } = useApiKeys();
 
-  // Source chain
-  const [srcChainId, setSrcChainId] = useState<number>(8453);
-  const [srcTokenIdx, setSrcTokenIdx] = useState<number>(1); // USDC on Base
+  // Selected source/destination tokens (object form; replaces chainId+tokenIdx).
+  const [srcToken, setSrcToken] = useState<PickerToken>({
+    name: "USDC",
+    ticker: "USDC",
+    address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    chain_id: 8453,
+  });
+  const [dstToken, setDstToken] = useState<PickerToken>({
+    name: "Ethereum",
+    ticker: "ETH",
+    chain_id: 8453,
+  });
   const [amount, setAmount] = useState("");
 
-  // Destination chain
-  const [dstChainId, setDstChainId] = useState<number>(8453);
-  const [dstTokenIdx, setDstTokenIdx] = useState<number>(0); // ETH on Base
+  // Picker (modal) — open for "src" or "dst" panel, null when closed.
+  const [pickerSide, setPickerSide] = useState<"src" | "dst" | null>(null);
+
+  // Derived chain ids (used widely below).
+  const srcChainId = srcToken.chain_id;
+  const dstChainId = dstToken.chain_id;
 
   // Chain types
   const srcChainType = getChainType(srcChainId);
@@ -217,13 +285,13 @@ function SwapContentInner() {
   // Wallets — separate source (sending) and destination (receiving)
   const { account: srcAccount } = useAccount({ chainType: srcChainType, selectedWallet: undefined });
   const { account: dstAccount } = useAccount({ chainType: dstChainType, selectedWallet: undefined });
-  const srcWallets = useInstalledWallets(srcChainType);
-  const dstWallets = useInstalledWallets(dstChainType);
-  const { connect } = useUniversalConnect({
-    onError: (err) => setError(err?.message || "Wallet connection failed"),
-  });
+  const disconnectAccount = useAccountDisconnect();
   const { switchChainAsync } = useSwitchChain();
-  const [showWalletPicker, setShowWalletPicker] = useState<"source" | "dest" | null>(null);
+  // Wallet connect modal — open for "src" or "dst" side; null when closed.
+  const [walletModalSide, setWalletModalSide] = useState<"src" | "dst" | null>(null);
+  // Transaction flow modal — opens when user confirms the swap and stays open
+  // through preparing → signing → executing → completed.
+  const [flowModalOpen, setFlowModalOpen] = useState(false);
 
   // Settings
   const [swapMode, setSwapMode] = useState<SwapMode>("ExactIn");
@@ -247,11 +315,25 @@ function SwapContentInner() {
 
   // State
   const [quote, setQuote] = useState<QuoteResponse | null>(null);
+  const [quoteFetchedAt, setQuoteFetchedAt] = useState<number | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
   const [swapData, setSwapData] = useState<SwapDataResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState<"configure" | "review" | "execute">("configure");
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Tick once a second so the route summary's countdown stays live.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const quoteAgeMs = quoteFetchedAt ? now - quoteFetchedAt : null;
+  const quoteIsStale = quoteAgeMs !== null && quoteAgeMs > QUOTE_TTL_MS;
+  const secondsUntilRefresh =
+    quoteFetchedAt && !quoteIsStale
+      ? Math.max(0, Math.ceil((QUOTE_TTL_MS - (quoteAgeMs ?? 0)) / 1000))
+      : null;
 
   // Wallet TX execution (source chain)
   const preparedTx = usePrepareTransaction(srcChainType);
@@ -282,14 +364,22 @@ function SwapContentInner() {
     if (pollingRef.current) clearInterval(pollingRef.current);
     pollingRef.current = setInterval(async () => {
       try {
-        const data = await apiCall("/api/sale", {
+        // GET /pay-orders/:id returns the full order: { id, status, payment, ... }
+        // POST /swap/data returns { status, data, payorder_id }. Normalize so
+        // swapData.data is always the freshest order body — that's what the
+        // modal's per-leg timeline + destination_tx_hash read from.
+        const order = await apiCall("/api/sale", {
           action: "status",
           apiKey,
           payorder_id: orderId,
         }, addLog);
-        if (data.status) {
-          setSwapData((prev: SwapDataResponse) => prev ? { ...prev, status: data.status } : prev);
-          if (["COMPLETED", "FAILED", "EXPIRED", "REFUNDED"].includes(data.status as string)) {
+        if (order && order.status) {
+          setSwapData((prev: SwapDataResponse) => {
+            if (!prev) return prev;
+            const nextData = order.payment ?? order.data ?? prev.data;
+            return { ...prev, status: order.status, data: nextData };
+          });
+          if (["COMPLETED", "FAILED", "EXPIRED", "REFUNDED"].includes(order.status as string)) {
             if (pollingRef.current) clearInterval(pollingRef.current);
           }
         }
@@ -299,10 +389,87 @@ function SwapContentInner() {
     }, 5000);
   }, [apiKey, addLog]);
 
-  const srcTokens = POPULAR_TOKENS[srcChainId] || [];
-  const dstTokens = POPULAR_TOKENS[dstChainId] || [];
-  const srcToken = srcTokens[srcTokenIdx] || srcTokens[0];
-  const dstToken = dstTokens[dstTokenIdx] || dstTokens[0];
+  // Wallet-held tokens for the connected source address on the current src chain.
+  // Fetched from /api/wallet-tokens (GoldRush under the hood). Merged with
+  // POPULAR_TOKENS so the "From" dropdown shows whatever the user actually holds.
+  const [walletTokens, setWalletTokens] = useState<TokenInfo[]>([]);
+  const [walletTokensLoading, setWalletTokensLoading] = useState(false);
+
+  useEffect(() => {
+    const addr = srcAccount?.address;
+    if (!addr) {
+      setWalletTokens([]);
+      return;
+    }
+    let cancelled = false;
+    setWalletTokensLoading(true);
+    (async () => {
+      try {
+        const res = await fetch("/api/wallet-tokens", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chainId: srcChainId, address: addr }),
+        });
+        const json = (await res.json()) as {
+          tokens?: Array<{
+            name: string;
+            ticker: string;
+            address?: string;
+            uiAmount?: number;
+          }>;
+        };
+        if (cancelled) return;
+        const next = (json.tokens ?? []).map((t) => ({
+          name: t.name,
+          ticker: t.ticker,
+          address: t.address,
+          uiAmount: t.uiAmount,
+        }));
+        setWalletTokens(next);
+        // No auto-selection: the picker surfaces balances directly so the
+        // user can pick deliberately rather than have selection swap under
+        // them on chain change.
+      } catch {
+        if (!cancelled) setWalletTokens([]);
+      } finally {
+        if (!cancelled) setWalletTokensLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [srcAccount?.address, srcChainId]);
+
+  // Wallet balance entry for the currently-selected source token (used to
+  // render the "Balance: X" line in the From panel).
+  const srcWalletBalance = useMemo(() => {
+    const wantAddr = srcToken.address?.toLowerCase();
+    return walletTokens.find((t) =>
+      wantAddr ? t.address?.toLowerCase() === wantAddr : !t.address,
+    );
+  }, [walletTokens, srcToken.address]);
+
+  // Picker pool — wallet tokens (with balances) for the active source chain,
+  // plus POPULAR_TOKENS across all chains so the user can browse anything.
+  const pickerWalletTokens: PickerToken[] = useMemo(
+    () => walletTokens.map((t) => ({ ...t, chain_id: srcChainId })),
+    [walletTokens, srcChainId],
+  );
+
+  const popularByChain: Record<number, PickerToken[]> = useMemo(() => {
+    const out: Record<number, PickerToken[]> = {};
+    for (const cidStr of Object.keys(POPULAR_TOKENS)) {
+      const cid = Number(cidStr);
+      out[cid] = (POPULAR_TOKENS[cid] || []).map((t) => ({
+        name: t.name,
+        ticker: t.ticker,
+        address: t.address,
+        chain_id: cid,
+      }));
+    }
+    return out;
+  }, []);
+
   const crossChain = isCrossChain(srcChainId, dstChainId);
 
   const buildIntent = useCallback(() => {
@@ -326,26 +493,21 @@ function SwapContentInner() {
   }, [srcChainId, srcToken, dstChainId, dstToken, amount, swapMode, slippageBps, srcAccount?.address]);
 
   const handleSwapDirection = () => {
-    setSrcChainId(dstChainId);
-    setDstChainId(srcChainId);
-    setSrcTokenIdx(dstTokenIdx);
-    setDstTokenIdx(srcTokenIdx);
+    const oldSrc = srcToken;
+    setSrcToken(dstToken);
+    setDstToken(oldSrc);
     fullReset();
   };
 
-  const getQuote = async () => {
-    if (!amount || parseFloat(amount) <= 0) {
-      setError("Enter an amount");
-      return;
-    }
-    if (!apiKey) {
-      setError("API key required — set it on the main page");
-      return;
-    }
+  // Silent quote fetch — runs from auto-quote effects and the manual refresh
+  // button. Doesn't toggle the global `loading` state and doesn't set errors
+  // unless the user is actively in `configure` and inputs look complete.
+  const fetchQuote = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!amount || parseFloat(amount) <= 0) return;
+    if (!apiKey) return;
 
-    setLoading(true);
-    setError(null);
-    setQuote(null);
+    setQuoteLoading(true);
+    if (!opts?.silent) setError(null);
     addLog("info", "Getting quote...", buildIntent());
 
     try {
@@ -354,15 +516,55 @@ function SwapContentInner() {
         apiKey,
         intent: buildIntent(),
       }, addLog);
-
       setQuote({ data });
-      setStep("review");
+      setQuoteFetchedAt(Date.now());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to get quote");
+      // Only surface quote errors when not running silently — auto-quote
+      // shouldn't constantly clobber the error banner.
+      if (!opts?.silent) {
+        setError(e instanceof Error ? e.message : "Failed to get quote");
+      }
     } finally {
-      setLoading(false);
+      setQuoteLoading(false);
     }
-  };
+  }, [amount, apiKey, buildIntent, addLog]);
+
+  // Auto-quote: when inputs change, fetch a fresh quote (debounced).
+  useEffect(() => {
+    if (step !== "configure") return; // freeze during execution
+    if (!amount || parseFloat(amount) <= 0) {
+      setQuote(null);
+      setQuoteFetchedAt(null);
+      return;
+    }
+    if (!apiKey) return;
+    const handle = setTimeout(() => {
+      fetchQuote({ silent: false });
+    }, QUOTE_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+    // We intentionally don't depend on fetchQuote — it captures everything
+    // we care about via its own deps and changes on every input edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    amount,
+    apiKey,
+    step,
+    srcToken.chain_id,
+    srcToken.address,
+    dstToken.chain_id,
+    dstToken.address,
+    swapMode,
+    slippageBps,
+    srcAccount?.address,
+  ]);
+
+  // Stale-quote refresh: once the current quote ages out, silently refetch.
+  useEffect(() => {
+    if (step !== "configure") return;
+    if (!quoteIsStale) return;
+    fetchQuote({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quoteIsStale, step]);
 
   const getSwapData = async () => {
     const addr = receivingAddress;
@@ -493,6 +695,7 @@ function SwapContentInner() {
   const reset = () => {
     if (pollingRef.current) clearInterval(pollingRef.current);
     setQuote(null);
+    setQuoteFetchedAt(null);
     setSwapData(null);
     setError(null);
     setTxHash(null);
@@ -509,305 +712,346 @@ function SwapContentInner() {
   const dstChain = CHAINS.find((c) => c.id === dstChainId);
 
   return (
-    <div style={{ minHeight: "100vh", background: "var(--background)", padding: "24px" }}>
-      {/* Header */}
-      <div style={{ maxWidth: 520, margin: "0 auto 24px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <Link href="/" style={{ color: "var(--text-muted)", textDecoration: "none", fontSize: 14 }}>
-          ← Back
-        </Link>
-        <h1 style={{ fontSize: 20, fontWeight: 700, color: "#fff", margin: 0 }}>
-          {crossChain ? "Bridge" : "Swap"}
-        </h1>
-        <Link href="/dashboard" style={{ color: "var(--text-muted)", textDecoration: "none", fontSize: 14 }}>
-          Dashboard →
-        </Link>
-      </div>
-
-      {/* Main Card */}
+    <div
+      style={{
+        minHeight: "100vh",
+        background: `radial-gradient(1200px 600px at 50% -200px, rgba(124,92,255,0.18), transparent 60%), radial-gradient(900px 500px at 100% 10%, rgba(79,209,255,0.10), transparent 60%), ${VS.bg}`,
+        paddingBottom: 48,
+        fontFeatureSettings: '"tnum","cv11"',
+      }}
+    >
+      {/* Sticky Top Bar */}
       <div
         style={{
-          maxWidth: 520,
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+          backdropFilter: "saturate(140%) blur(12px)",
+          WebkitBackdropFilter: "saturate(140%) blur(12px)",
+          background: VS.glassBg,
+          borderBottom: `1px solid ${VS.border}`,
+        }}
+      >
+        <div
+          style={{
+            maxWidth: 1120,
+            margin: "0 auto",
+            padding: "14px 24px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+          }}
+        >
+          <VaporswapLogo />
+
+          {/* Swap / Bridge — single unified label */}
+          <div
+            style={{
+              padding: "6px 16px",
+              borderRadius: 999,
+              background: VS.gradientSoft,
+              border: `1px solid ${VS.borderStrong}`,
+              fontSize: 12,
+              fontWeight: 700,
+              letterSpacing: 0.4,
+              color: VS.text,
+            }}
+          >
+            Swap / Bridge
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <ThemeToggle />
+            {srcAccount?.isConnected && srcAccount.address ? (
+              <button
+                onClick={() => setWalletModalSide("src")}
+                title="Change source wallet"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "6px 12px",
+                  background: VS.surface,
+                  border: `1px solid ${VS.borderStrong}`,
+                  borderRadius: 999,
+                  color: VS.text,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  fontFamily: "monospace",
+                  letterSpacing: -0.2,
+                  cursor: "pointer",
+                }}
+              >
+                <span
+                  style={{
+                    width: 16,
+                    height: 16,
+                    borderRadius: "50%",
+                    background: VS.gradient,
+                    display: "inline-block",
+                    flexShrink: 0,
+                  }}
+                />
+                {srcAccount.address.slice(0, 6)}…{srcAccount.address.slice(-4)}
+              </button>
+            ) : (
+              <button
+                onClick={() => setWalletModalSide("src")}
+                style={{
+                  background: VS.gradient,
+                  border: "none",
+                  borderRadius: 999,
+                  color: "#fff",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  padding: "8px 16px",
+                  cursor: "pointer",
+                  letterSpacing: 0.4,
+                }}
+              >
+                Connect
+              </button>
+            )}
+            <Link
+              href="/"
+              style={{
+                fontSize: 13,
+                color: VS.textMuted,
+                textDecoration: "none",
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: `1px solid ${VS.border}`,
+              }}
+            >
+              ← Home
+            </Link>
+            <Link
+              href="/dashboard"
+              style={{
+                fontSize: 13,
+                color: VS.text,
+                textDecoration: "none",
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: `1px solid ${VS.borderStrong}`,
+                background: VS.surface,
+              }}
+            >
+              Dashboard
+            </Link>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "stretch", gap: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, padding: "32px 24px 0" }}>
+
+      {/* Main Card — gradient border via padded wrapper */}
+      <div
+        style={{
+          maxWidth: 540,
           margin: "0 auto",
-          background: "var(--card-bg)",
-          border: "1px solid #1a1a1a",
-          borderRadius: 16,
+          padding: 1,
+          borderRadius: 22,
+          background: VS.gradient,
+          boxShadow: VS.shadow,
+        }}
+      >
+      <div
+        style={{
+          background: VS.surface,
+          borderRadius: 21,
           padding: 0,
           overflow: "hidden",
         }}
       >
-        {/* Wallet Connect Bar */}
-        <div style={{ padding: "12px 24px", borderBottom: "1px solid #1a1a1a" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            {/* Source wallet */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {srcAccount?.isConnected ? (
-                <>
-                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", display: "inline-block" }} />
-                  <span style={{ fontSize: 13, color: "#fff", fontFamily: "monospace" }}>
-                    {srcAccount.address?.slice(0, 6)}...{srcAccount.address?.slice(-4)}
-                  </span>
-                  <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "rgba(255,0,51,0.15)", color: "var(--pink-primary)", fontWeight: 600 }}>
-                    {srcChainType}
-                  </span>
-                </>
-              ) : (
-                <button
-                  onClick={() => setShowWalletPicker(showWalletPicker === "source" ? null : "source")}
-                  style={{ background: "var(--pink-primary)", border: "none", borderRadius: 8, color: "#fff", fontSize: 12, fontWeight: 600, padding: "6px 12px", cursor: "pointer" }}
-                >
-                  Connect Source
-                </button>
-              )}
-            </div>
-
-            <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", color: crossChain ? "#8b5cf6" : "var(--pink-primary)", background: crossChain ? "rgba(139,92,246,0.1)" : "rgba(255,0,51,0.1)", padding: "4px 10px", borderRadius: 4 }}>
-              {crossChain ? "BRIDGE" : "SWAP"}
-            </span>
-          </div>
-
-          {/* Destination wallet — always shown */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, paddingTop: 8, borderTop: "1px solid #111" }}>
-            <span style={{ fontSize: 11, color: "#666", marginRight: 4, flexShrink: 0 }}>To:</span>
-            {receivingAddress ? (
-              <>
-                <span style={{ width: 8, height: 8, borderRadius: "50%", background: dstAddress ? "#8b5cf6" : "#f59e0b", display: "inline-block", flexShrink: 0 }} />
-                <span style={{ fontSize: 13, color: "#fff", fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {receivingAddress.slice(0, 6)}...{receivingAddress.slice(-4)}
-                </span>
-                <span style={{ fontSize: 10, color: "#666", flexShrink: 0 }}>
-                  {dstAddress ? "(wallet)" : "(manual)"}
-                </span>
-                <button
-                  onClick={() => { setDstAddress(""); setReceivingAddressManual(""); }}
-                  style={{ background: "none", border: "1px solid #222", borderRadius: 6, color: "#666", fontSize: 11, padding: "2px 6px", cursor: "pointer", marginLeft: "auto", flexShrink: 0 }}
-                >
-                  Change
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={() => setShowWalletPicker(showWalletPicker === "dest" ? null : "dest")}
-                  style={{ background: "#8b5cf6", border: "none", borderRadius: 8, color: "#fff", fontSize: 12, fontWeight: 600, padding: "6px 12px", cursor: "pointer" }}
-                >
-                  Connect {dstChainType} Wallet
-                </button>
-                <button
-                  onClick={() => setShowSettings(true)}
-                  style={{ background: "none", border: "1px solid #222", borderRadius: 6, color: "#666", fontSize: 11, padding: "4px 8px", cursor: "pointer", marginLeft: "auto" }}
-                >
-                  Paste Address
-                </button>
-              </>
-            )}
-          </div>
+        {/* Wallet Connect Bar — source side only; recipient lives on the To panel. */}
+        <div
+          style={{
+            padding: "12px 24px",
+            borderBottom: `1px solid ${VS.border}`,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          {srcAccount?.isConnected ? (
+            <>
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: VS.success,
+                  display: "inline-block",
+                }}
+              />
+              <span style={{ fontSize: 13, color: VS.text, fontFamily: "monospace" }}>
+                {srcAccount.address?.slice(0, 6)}…{srcAccount.address?.slice(-4)}
+              </span>
+              <span
+                style={{
+                  fontSize: 10,
+                  padding: "2px 6px",
+                  borderRadius: 4,
+                  background: VS.gradientSoft,
+                  color: VS.text,
+                  fontWeight: 600,
+                  letterSpacing: 0.4,
+                }}
+              >
+                {srcChainType}
+              </span>
+              <button
+                onClick={() => setWalletModalSide("src")}
+                style={{
+                  marginLeft: "auto",
+                  background: "transparent",
+                  border: `1px solid ${VS.border}`,
+                  borderRadius: 8,
+                  color: VS.textMuted,
+                  fontSize: 11,
+                  padding: "4px 10px",
+                  cursor: "pointer",
+                }}
+              >
+                Change
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setWalletModalSide("src")}
+              style={{
+                background: VS.gradient,
+                border: "none",
+                borderRadius: 999,
+                color: "#fff",
+                fontSize: 12,
+                fontWeight: 700,
+                padding: "6px 16px",
+                cursor: "pointer",
+                letterSpacing: 0.4,
+              }}
+            >
+              Connect Source Wallet
+            </button>
+          )}
         </div>
 
-        {/* Wallet Picker */}
-        {showWalletPicker && (
-          <div style={{ padding: "12px 24px", borderBottom: "1px solid #1a1a1a" }}>
-            <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>
-              {showWalletPicker === "source"
-                ? `Connect ${srcChainType} wallet (sending)`
-                : `Connect ${dstChainType} wallet (receiving)`}
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {(showWalletPicker === "source" ? srcWallets : dstWallets).map((wallet) => (
-                <button
-                  key={wallet.id}
-                  onClick={async () => {
-                    if (wallet.connectors[0]) {
-                      const picking = showWalletPicker;
-                      await connect({ walletConnector: wallet.connectors[0] });
-                      if (picking === "dest") {
-                        setPendingDstCapture(true);
-                      }
-                      setShowWalletPicker(null);
-                    }
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: "8px 14px",
-                    background: "#111",
-                    border: "1px solid #222",
-                    borderRadius: 8,
-                    color: "#fff",
-                    fontSize: 13,
-                    cursor: "pointer",
-                  }}
-                >
-                  {wallet.icon && (
-                    <img src={wallet.icon} alt="" style={{ width: 20, height: 20, borderRadius: 4 }} />
-                  )}
-                  {wallet.name}
-                </button>
-              ))}
-              {(showWalletPicker === "source" ? srcWallets : dstWallets).length === 0 && (
-                <div style={{ fontSize: 12, color: "#666" }}>
-                  No {showWalletPicker === "source" ? srcChainType : dstChainType} wallets detected.
-                  {showWalletPicker === "dest" && " You can paste an address manually in Settings."}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* ── FROM Section ── */}
-        <div style={{ padding: "16px 24px" }}>
-          <label style={{ fontSize: 12, color: "#666", fontWeight: 500, display: "block", marginBottom: 8 }}>
-            From
-          </label>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <select
-              value={srcChainId}
-              onChange={(e) => {
-                setSrcChainId(Number(e.target.value));
-                setSrcTokenIdx(0);
-                reset();
-              }}
-              style={{ flex: 1, fontSize: 14 }}
-            >
-              {CHAINS.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.icon} {c.name}
-                </option>
-              ))}
-            </select>
-            <select
-              value={srcTokenIdx}
-              onChange={(e) => {
-                setSrcTokenIdx(Number(e.target.value));
-                reset();
-              }}
-              style={{ flex: 1, fontSize: 14 }}
-            >
-              {srcTokens.map((t, i) => (
-                <option key={i} value={i}>
-                  {t.ticker}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div style={{ position: "relative" }}>
+        <SwapPanel
+          label="From"
+          token={srcToken}
+          chain={srcChain}
+          onPickToken={() => setPickerSide("src")}
+          amountInput={
             <input
               type="number"
-              placeholder="0.0"
+              inputMode="decimal"
+              placeholder="0"
               value={amount}
               onChange={(e) => {
                 setAmount(e.target.value);
-                if (quote) reset();
               }}
+              aria-label="Amount to send"
               style={{
-                fontSize: 28,
-                fontWeight: 600,
-                padding: "16px",
-                background: "var(--input-bg)",
-                border: "1px solid #1a1a1a",
-                borderRadius: 12,
-                letterSpacing: -0.5,
+                width: "100%",
+                background: "transparent",
+                border: "none",
+                outline: "none",
+                fontSize: 32,
+                fontWeight: 700,
+                color: VS.text,
+                letterSpacing: -0.8,
+                fontVariantNumeric: "tabular-nums",
+                padding: 0,
               }}
             />
-            <div style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 14, color: "#666", fontWeight: 500 }}>{srcToken?.ticker}</span>
-            </div>
-          </div>
-        </div>
+          }
+          usdValue={quote?.data?.input?.currency_amount?.value_usd}
+          balance={srcWalletBalance?.uiAmount}
+          balanceLoading={walletTokensLoading}
+          onPercent={(pct) => {
+            const bal = srcWalletBalance?.uiAmount;
+            if (typeof bal === "number" && bal > 0) {
+              const next = pct === 1 ? bal : bal * pct;
+              // 6 decimals is enough for stable presentation; user can edit.
+              setAmount(next.toString());
+            }
+          }}
+        />
 
         {/* ── Swap Direction Button ── */}
         <div style={{ display: "flex", justifyContent: "center", margin: "-8px 0", position: "relative", zIndex: 1 }}>
           <button
             onClick={handleSwapDirection}
             style={{
-              width: 40,
-              height: 40,
+              width: 44,
+              height: 44,
               borderRadius: "50%",
-              background: "#111",
-              border: "2px solid #1a1a1a",
-              color: "var(--pink-primary)",
+              background: VS.surface,
+              border: `1px solid ${VS.borderStrong}`,
+              color: VS.text,
               fontSize: 18,
               cursor: "pointer",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              transition: "all 0.2s",
+              transition: "transform 250ms cubic-bezier(.5,1.5,.5,1), border-color 200ms",
+              boxShadow: "0 8px 24px -12px rgba(0,0,0,0.8)",
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.borderColor = "var(--pink-primary)";
+              e.currentTarget.style.borderColor = VS.accent2;
               e.currentTarget.style.transform = "rotate(180deg)";
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = "#1a1a1a";
+              e.currentTarget.style.borderColor = VS.borderStrong;
               e.currentTarget.style.transform = "rotate(0deg)";
             }}
           >
-            ↕
+            ⇅
           </button>
         </div>
 
         {/* ── TO Section ── */}
-        <div style={{ padding: "0 24px 16px" }}>
-          <label style={{ fontSize: 12, color: "#666", fontWeight: 500, display: "block", marginBottom: 8 }}>
-            To
-          </label>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <select
-              value={dstChainId}
-              onChange={(e) => {
-                setDstChainId(Number(e.target.value));
-                setDstTokenIdx(0);
-                reset();
+        <SwapPanel
+          label="To"
+          token={dstToken}
+          chain={dstChain}
+          onPickToken={() => setPickerSide("dst")}
+          rightHeader={
+            <RecipientDropdown
+              chainType={dstChainType}
+              currentAddress={receivingAddress}
+              isFromWallet={!!dstAddress && !receivingAddressManual}
+              connectedAddress={dstAccount?.isConnected ? dstAccount.address : undefined}
+              onSelectConnected={(addr) => {
+                setDstAddress(addr);
+                setReceivingAddressManual("");
               }}
-              style={{ flex: 1, fontSize: 14 }}
-            >
-              {CHAINS.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.icon} {c.name}
-                </option>
-              ))}
-            </select>
-            <select
-              value={dstTokenIdx}
-              onChange={(e) => {
-                setDstTokenIdx(Number(e.target.value));
-                reset();
+              onClear={() => {
+                setDstAddress("");
+                setReceivingAddressManual("");
               }}
-              style={{ flex: 1, fontSize: 14 }}
-            >
-              {dstTokens.map((t, i) => (
-                <option key={i} value={i}>
-                  {t.ticker}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Quote output preview */}
-          <div
-            style={{
-              background: "var(--input-bg)",
-              border: "1px solid #1a1a1a",
-              borderRadius: 12,
-              padding: "16px",
-              minHeight: 60,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            {quote?.data ? (
-              <>
-                <span style={{ fontSize: 28, fontWeight: 600, color: "#fff", letterSpacing: -0.5 }}>
-                  {formatAmount(quote.data.output?.currency_amount?.ui_amount)}
-                </span>
-                <span style={{ fontSize: 14, color: "#666", fontWeight: 500 }}>{dstToken?.ticker}</span>
-              </>
-            ) : (
-              <span style={{ fontSize: 28, fontWeight: 600, color: "#333" }}>0.0</span>
-            )}
-          </div>
-        </div>
+              onPasteAddress={(addr) => {
+                setReceivingAddressManual(addr);
+                setDstAddress("");
+              }}
+              onConnectNewWallet={() => {
+                setPendingDstCapture(true);
+                setWalletModalSide("dst");
+              }}
+            />
+          }
+          amountInput={
+            <ReadOnlyAmount
+              value={quote?.data?.output?.currency_amount?.ui_amount}
+              loading={quoteLoading}
+            />
+          }
+          usdValue={quote?.data?.output?.currency_amount?.value_usd}
+        />
 
         {/* ── Settings Toggle ── */}
         <div style={{ padding: "0 24px" }}>
@@ -847,9 +1091,9 @@ function SwapContentInner() {
                         fontSize: 13,
                         fontWeight: 500,
                         borderRadius: 8,
-                        border: `1px solid ${swapMode === m ? "var(--pink-primary)" : "#1a1a1a"}`,
-                        background: swapMode === m ? "rgba(255,0,51,0.1)" : "transparent",
-                        color: swapMode === m ? "var(--pink-primary)" : "#666",
+                        border: `1px solid ${swapMode === m ? VS.borderStrong : VS.border}`,
+                        background: swapMode === m ? VS.gradientSoft : "transparent",
+                        color: swapMode === m ? VS.text : VS.textMuted,
                         cursor: "pointer",
                       }}
                     >
@@ -859,33 +1103,9 @@ function SwapContentInner() {
                 </div>
               </div>
 
-              {/* Slippage */}
-              <div>
-                <label style={{ fontSize: 11, color: "#666", display: "block", marginBottom: 4 }}>
-                  Slippage Tolerance
-                </label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  {[50, 100, 200, 500].map((bps) => (
-                    <button
-                      key={bps}
-                      onClick={() => setSlippageBps(bps)}
-                      style={{
-                        flex: 1,
-                        padding: "8px",
-                        fontSize: 13,
-                        borderRadius: 8,
-                        border: `1px solid ${slippageBps === bps ? "var(--pink-primary)" : "#1a1a1a"}`,
-                        background: slippageBps === bps ? "rgba(255,0,51,0.1)" : "transparent",
-                        color: slippageBps === bps ? "var(--pink-primary)" : "#666",
-                        cursor: "pointer",
-                        fontWeight: 500,
-                      }}
-                    >
-                      {bps / 100}%
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {/* Slippage now lives on the route summary card (the
+                  "Auto x.xx%" chip). Removed from Settings to avoid
+                  duplication. */}
 
               {/* Receiving address */}
               <div>
@@ -913,364 +1133,148 @@ function SwapContentInner() {
           )}
         </div>
 
-        {/* ── Quote Details ── */}
-        {quote?.data && step === "review" && (
-          <div style={{ margin: "0 24px", padding: 16, background: "#0d0d0d", borderRadius: 12, border: "1px solid #1a1a1a" }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", marginBottom: 12 }}>
-              Route Details
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: "#666" }}>Route</span>
-                <span style={{ color: "#fff" }}>
-                  {srcChain?.icon} {srcToken?.ticker}
-                  <span style={{ color: crossChain ? "#8b5cf6" : "var(--pink-primary)", margin: "0 6px" }}>→</span>
-                  {dstChain?.icon} {dstToken?.ticker}
-                </span>
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: "#666" }}>You Pay</span>
-                <span style={{ color: "#fff" }}>
-                  {formatAmount(quote.data.input?.currency_amount?.ui_amount)} {quote.data.input?.ticker || srcToken?.ticker}
-                  <span style={{ color: "#666", marginLeft: 6 }}>
-                    ({formatUsd(quote.data.input?.currency_amount?.value_usd)})
-                  </span>
-                </span>
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: "#666" }}>You Receive</span>
-                <span style={{ color: "#22c55e" }}>
-                  {formatAmount(quote.data.output?.currency_amount?.ui_amount)} {quote.data.output?.ticker || dstToken?.ticker}
-                  <span style={{ color: "#666", marginLeft: 6 }}>
-                    ({formatUsd(quote.data.output?.currency_amount?.value_usd)})
-                  </span>
-                </span>
-              </div>
-
-              {quote.data.price_impact !== undefined && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>Price Impact</span>
-                  <span
-                    style={{
-                      color:
-                        Math.abs(quote.data.price_impact) > 5
-                          ? "#ef4444"
-                          : Math.abs(quote.data.price_impact) > 2
-                            ? "#f59e0b"
-                            : "#22c55e",
-                    }}
-                  >
-                    {quote.data.price_impact.toFixed(4)}%
-                  </span>
-                </div>
-              )}
-
-              {quote.data.slippage_bps !== undefined && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>Slippage</span>
-                  <span style={{ color: "#fff" }}>{quote.data.slippage_bps / 100}%</span>
-                </div>
-              )}
-
-              {quote.data.input?.fees?.total_fee && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>Fees</span>
-                  <span style={{ color: "#f59e0b" }}>
-                    {formatUsd(quote.data.input.fees.total_fee.value_usd)}
-                  </span>
-                </div>
-              )}
-
-              {quote.data.input?.gas && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>Est. Gas</span>
-                  <span style={{ color: "#fff" }}>{formatUsd(quote.data.input.gas.value_usd)}</span>
-                </div>
-              )}
-
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: "#666" }}>Mode</span>
-                <span style={{ color: "#fff" }}>
-                  {quote.data.swap_mode === "ExactIn" ? "Exact Input" : "Exact Output"}
-                </span>
-              </div>
-            </div>
-          </div>
+        {/* ── Compact Route Summary ── */}
+        {step === "configure" && (quote?.data || quoteLoading) && (
+          <RouteSummary
+            quote={quote?.data ?? null}
+            isLoading={quoteLoading}
+            isStale={quoteIsStale}
+            srcTicker={srcToken?.ticker || "—"}
+            dstTicker={dstToken?.ticker || "—"}
+            slippageBps={slippageBps}
+            onSlippageChange={(bps) => {
+              setSlippageBps(bps);
+              setQuoteFetchedAt(null); // forces auto-refetch via deps
+            }}
+            secondsUntilRefresh={secondsUntilRefresh}
+            onRefresh={() => fetchQuote({ silent: false })}
+          />
         )}
 
-        {/* ── Swap Data / Execution Details ── */}
-        {swapData?.data && step === "execute" && (
-          <div style={{ margin: "0 24px", padding: 16, background: "#0d0d0d", borderRadius: 12, border: "1px solid #1a1a1a" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: "#22c55e" }}>
-                {txHash ? "Transaction Sent" : "Transaction Ready"}
-              </div>
-              {swapData.status && (
-                <span style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  padding: "2px 8px",
-                  borderRadius: 4,
-                  background: `${STATUS_COLORS[swapData.status] || "#666"}20`,
-                  color: STATUS_COLORS[swapData.status] || "#666",
-                }}>
-                  {swapData.status}
-                </span>
-              )}
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
-              {swapData.payorder_id && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>Order ID</span>
-                  <span
-                    style={{ color: "#888", fontFamily: "monospace", fontSize: 11, cursor: "pointer" }}
-                    onClick={() => navigator.clipboard.writeText(swapData.payorder_id)}
-                    title="Click to copy"
-                  >
-                    {swapData.payorder_id}
-                  </span>
-                </div>
-              )}
-
-              {swapData.data.src && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>You Pay</span>
-                  <span style={{ color: "#fff" }}>
-                    {formatAmount(swapData.data.src.total?.ui_amount)} {swapData.data.src.ticker}
-                    <span style={{ color: "#666", marginLeft: 6 }}>
-                      ({formatUsd(swapData.data.src.total?.value_usd)})
-                    </span>
-                  </span>
-                </div>
-              )}
-
-              {swapData.data.dst && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>You Receive</span>
-                  <span style={{ color: "#22c55e" }}>
-                    {formatAmount(swapData.data.dst.currency_amount?.ui_amount)} {swapData.data.dst.ticker}
-                    <span style={{ color: "#666", marginLeft: 6 }}>
-                      ({formatUsd(swapData.data.dst.currency_amount?.value_usd)})
-                    </span>
-                  </span>
-                </div>
-              )}
-
-              {!txHash && swapData.data.deposit_address && (
-                <div>
-                  <span style={{ color: "#666", display: "block", marginBottom: 4 }}>Deposit Address</span>
-                  <div
-                    style={{
-                      background: "#111",
-                      padding: "8px 12px",
-                      borderRadius: 8,
-                      fontFamily: "monospace",
-                      fontSize: 12,
-                      color: "#fff",
-                      wordBreak: "break-all",
-                      cursor: "pointer",
-                    }}
-                    onClick={() => navigator.clipboard.writeText(swapData.data.deposit_address)}
-                    title="Click to copy"
-                  >
-                    {swapData.data.deposit_address}
-                  </div>
-                </div>
-              )}
-
-              {swapData.data.expires_at && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#666" }}>Expires</span>
-                  <span style={{ color: "#f59e0b" }}>
-                    {new Date(swapData.data.expires_at).toLocaleTimeString()}
-                  </span>
-                </div>
-              )}
-
-              {/* TX Hash */}
-              {txHash && (
-                <div>
-                  <span style={{ color: "#666", display: "block", marginBottom: 4 }}>Transaction Hash</span>
-                  <div
-                    style={{
-                      padding: "8px 12px",
-                      borderRadius: 8,
-                      fontFamily: "monospace",
-                      fontSize: 12,
-                      color: "#22c55e",
-                      wordBreak: "break-all",
-                      cursor: "pointer",
-                      background: "rgba(34,197,94,0.1)",
-                      border: "1px solid rgba(34,197,94,0.3)",
-                    }}
-                    onClick={() => navigator.clipboard.writeText(txHash)}
-                    title="Click to copy"
-                  >
-                    {txHash}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        {/* In-flight order details have moved into the TransactionFlowModal
+            (mounted at the bottom of the page). Keeping the inline panel
+            removed avoids duplicating state between two surfaces. */}
 
         {/* ── Error ── */}
         {error && (
-          <div style={{ margin: "12px 24px 0", padding: "10px 14px", background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, fontSize: 13, color: "#ef4444" }}>
+          <div
+            style={{
+              margin: "12px 24px 0",
+              padding: "10px 14px",
+              background: "rgba(255, 92, 122, 0.08)",
+              border: "1px solid rgba(255, 92, 122, 0.3)",
+              borderRadius: 8,
+              fontSize: 13,
+              color: VS.danger,
+            }}
+          >
             {error}
           </div>
         )}
 
         {/* ── Action Buttons ── */}
         <div style={{ padding: "16px 24px 24px" }}>
-          {step === "configure" && (
-            <button
-              onClick={!srcAccount?.isConnected ? () => setShowWalletPicker("source") : getQuote}
-              disabled={loading || (srcAccount?.isConnected ? !amount : false)}
-              style={{
-                width: "100%",
-                padding: "16px",
-                fontSize: 16,
-                fontWeight: 600,
-                borderRadius: 12,
-                border: "none",
-                background: !srcAccount?.isConnected || amount ? "var(--pink-primary)" : "#1a1a1a",
-                color: !srcAccount?.isConnected || amount ? "#fff" : "#666",
-                cursor: !srcAccount?.isConnected || amount ? "pointer" : "not-allowed",
-                transition: "all 0.2s",
-                opacity: loading ? 0.7 : 1,
-              }}
-            >
-              {!srcAccount?.isConnected
-                ? "Connect Wallet"
-                : loading
-                  ? "Getting Quote..."
-                  : amount
-                    ? "Get Quote"
-                    : "Enter an amount"}
-            </button>
-          )}
-
-          {step === "review" && (
-            <div style={{ display: "flex", gap: 8 }}>
+          {step === "configure" && (() => {
+            // Single state-aware CTA. Auto-quote runs in the background; the
+            // button label tells the user exactly what's missing.
+            const noWallet = !srcAccount?.isConnected;
+            const noAmount = !amount || parseFloat(amount) <= 0;
+            const noRecipient = !receivingAddress;
+            // Only flag insufficient balance when we have a known balance for
+            // the selected source token and chain (i.e. EVM source + Goldrush
+            // returned a value). Avoids false negatives for non-EVM chains.
+            const insufficient =
+              !noAmount &&
+              srcWalletBalance?.uiAmount !== undefined &&
+              parseFloat(amount) > srcWalletBalance.uiAmount;
+            const ready =
+              !noWallet && !noAmount && !noRecipient && !insufficient && !!quote?.data && !quoteLoading;
+            const onClick = noWallet
+              ? () => setWalletModalSide("src")
+              : noRecipient && isCrossType
+                ? undefined // RecipientDropdown is the right affordance
+                : ready
+                  ? () => {
+                      setFlowModalOpen(true);
+                      getSwapData();
+                    }
+                  : undefined;
+            const label = noWallet
+              ? "Connect Wallet"
+              : noAmount
+                ? "Enter an amount"
+                : noRecipient
+                  ? `Set ${dstChainType} recipient`
+                  : insufficient
+                    ? `Insufficient ${srcToken.ticker} balance`
+                    : quoteLoading && !quote?.data
+                      ? "Fetching quote…"
+                      : !quote?.data
+                        ? "No route available"
+                        : loading
+                          ? "Preparing…"
+                          : `${crossChain ? "Bridge" : "Swap"} Now`;
+            const enabled = !!onClick && !loading;
+            return (
               <button
-                onClick={reset}
-                style={{
-                  flex: 1,
-                  padding: "14px",
-                  fontSize: 14,
-                  fontWeight: 500,
-                  borderRadius: 12,
-                  border: "1px solid #1a1a1a",
-                  background: "transparent",
-                  color: "#666",
-                  cursor: "pointer",
-                }}
-              >
-                Back
-              </button>
-              <button
-                onClick={getSwapData}
-                disabled={loading}
-                style={{
-                  flex: 2,
-                  padding: "14px",
-                  fontSize: 14,
-                  fontWeight: 600,
-                  borderRadius: 12,
-                  border: "none",
-                  background: "var(--pink-primary)",
-                  color: "#fff",
-                  cursor: "pointer",
-                  opacity: loading ? 0.7 : 1,
-                }}
-              >
-                {loading ? "Preparing..." : `${crossChain ? "Bridge" : "Swap"} Now`}
-              </button>
-            </div>
-          )}
-
-          {step === "execute" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {srcAccount?.isConnected && !txHash && (
-                <button
-                  onClick={executeSwapFromWallet}
-                  disabled={loading}
-                  style={{
-                    width: "100%",
-                    padding: "16px",
-                    fontSize: 16,
-                    fontWeight: 700,
-                    borderRadius: 12,
-                    border: "none",
-                    background: "linear-gradient(135deg, var(--pink-primary) 0%, #8b5cf6 100%)",
-                    color: "#fff",
-                    cursor: loading ? "not-allowed" : "pointer",
-                    opacity: loading ? 0.7 : 1,
-                    letterSpacing: 0.5,
-                  }}
-                >
-                  {loading ? "Signing..." : `Sign & Send ${crossChain ? "Bridge" : "Swap"}`}
-                </button>
-              )}
-
-              {!srcAccount?.isConnected && !txHash && (
-                <button
-                  onClick={() => setShowWalletPicker("source")}
-                  style={{
-                    width: "100%",
-                    padding: "16px",
-                    fontSize: 16,
-                    fontWeight: 600,
-                    borderRadius: 12,
-                    border: "none",
-                    background: "var(--pink-primary)",
-                    color: "#fff",
-                    cursor: "pointer",
-                  }}
-                >
-                  Connect Wallet to Sign
-                </button>
-              )}
-
-              <button
-                onClick={reset}
+                onClick={onClick}
+                disabled={!enabled}
                 style={{
                   width: "100%",
-                  padding: "12px",
-                  fontSize: 13,
-                  fontWeight: 500,
+                  padding: "16px",
+                  fontSize: 16,
+                  fontWeight: 700,
                   borderRadius: 12,
-                  border: "1px solid #1a1a1a",
-                  background: "transparent",
-                  color: "#666",
-                  cursor: "pointer",
+                  border: "none",
+                  background: enabled ? VS.gradient : VS.surface2,
+                  color: enabled ? "#fff" : VS.textDim,
+                  cursor: enabled ? "pointer" : "not-allowed",
+                  transition: "all 200ms ease-out",
+                  opacity: loading ? 0.7 : 1,
+                  letterSpacing: 0.3,
+                  boxShadow: enabled ? "0 12px 32px -12px rgba(124,92,255,0.55)" : "none",
                 }}
               >
-                {txHash ? "New" : "Cancel"} {crossChain ? "Bridge" : "Swap"}
+                {label}
               </button>
-            </div>
+            );
+          })()}
+
+          {step === "execute" && (
+            <button
+              onClick={() => setFlowModalOpen(true)}
+              style={{
+                width: "100%",
+                padding: "14px",
+                fontSize: 14,
+                fontWeight: 600,
+                borderRadius: 12,
+                border: `1px solid ${VS.borderStrong}`,
+                background: VS.surface,
+                color: VS.text,
+                cursor: "pointer",
+              }}
+            >
+              {txHash ? "View transaction" : "Resume signing"}
+            </button>
           )}
         </div>
       </div>
+      </div>
 
       {/* Info footer */}
-      <div style={{ maxWidth: 520, margin: "16px auto 0", textAlign: "center" }}>
-        <p style={{ fontSize: 12, color: "#444" }}>
+      <div style={{ maxWidth: 540, margin: "20px auto 0", textAlign: "center" }}>
+        <p style={{ fontSize: 12, color: VS.textMuted, margin: 0 }}>
           {crossChain
-            ? "Cross-chain bridge powered by CoinVoyage routing aggregation"
-            : "Swap powered by CoinVoyage DEX aggregation"}
+            ? `Vaporswap · cross-chain routing across ${CHAINS.length} chains`
+            : `Vaporswap · best-route DEX aggregation`}
         </p>
-        <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 8, fontSize: 12 }}>
-          <span style={{ color: "#333" }}>{CHAINS.length} chains</span>
-          <span style={{ color: "#333" }}>·</span>
-          <span style={{ color: "#333" }}>Best route optimization</span>
-          <span style={{ color: "#333" }}>·</span>
-          <span style={{ color: "#333" }}>MEV protected</span>
+        <div style={{ display: "flex", justifyContent: "center", gap: 12, marginTop: 10, fontSize: 11, color: VS.textDim, letterSpacing: 0.3 }}>
+          <span>{CHAINS.length} CHAINS</span>
+          <span>•</span>
+          <span>BEST ROUTE</span>
+          <span>•</span>
+          <span>MEV PROTECTED</span>
         </div>
       </div>
 
@@ -1405,6 +1409,310 @@ function SwapContentInner() {
           </div>
         )}
       </div>
+      </div>
+      {srcChainType === ChainType.EVM && srcAccount?.isConnected && srcAccount.address && (
+        <WalletSidebar
+          address={srcAccount.address}
+          chains={CHAINS}
+          onDisconnect={() => {
+            disconnectAccount(srcAccount).catch(() => {});
+          }}
+        />
+      )}
+      </div>
+
+      {/* Token + Chain picker modal */}
+      <TokenChainPicker
+        isOpen={pickerSide !== null}
+        side={pickerSide}
+        chains={CHAINS}
+        popularByChain={popularByChain}
+        walletTokens={pickerWalletTokens}
+        initialChainId={pickerSide === "src" ? srcChainId : dstChainId}
+        starredChainIds={STARRED_CHAIN_IDS}
+        onSelect={(t) => {
+          if (pickerSide === "src") setSrcToken(t);
+          else if (pickerSide === "dst") setDstToken(t);
+          reset();
+        }}
+        onClose={() => setPickerSide(null)}
+      />
+
+      {/* Wallet connect modal — used by the top-bar Connect button, the
+          in-card "Connect Source Wallet" CTA, and the recipient dropdown's
+          "Connect a new wallet" entry. */}
+      <WalletConnectModal
+        isOpen={walletModalSide !== null}
+        chainType={walletModalSide === "dst" ? dstChainType : srcChainType}
+        title={
+          walletModalSide === "dst"
+            ? `Connect ${dstChainType} wallet to receive`
+            : "Log in or sign up"
+        }
+        onClose={() => setWalletModalSide(null)}
+      />
+
+      {/* Transaction flow modal — owns the post-confirm experience: route
+          visual + per-leg timeline + completion view. */}
+      <TransactionFlowModal
+        isOpen={flowModalOpen}
+        onClose={() => {
+          setFlowModalOpen(false);
+          // If we landed on a terminal status, fully reset so the user can
+          // start a new swap from a clean state.
+          if (
+            swapData?.status === "COMPLETED" ||
+            swapData?.status === "FAILED" ||
+            swapData?.status === "EXPIRED" ||
+            swapData?.status === "REFUNDED"
+          ) {
+            reset();
+          }
+        }}
+        srcToken={srcToken}
+        dstToken={dstToken}
+        srcChain={srcChain}
+        dstChain={dstChain}
+        orderData={swapData?.data ?? null}
+        orderStatus={swapData?.status}
+        depositTxHash={txHash}
+        isPreparing={loading && !swapData}
+        isSigning={loading && !!swapData && !txHash}
+        signError={error}
+        onSign={() => {
+          setError(null);
+          executeSwapFromWallet();
+        }}
+        onRetrySign={() => {
+          setError(null);
+          executeSwapFromWallet();
+        }}
+      />
+    </div>
+  );
+}
+
+// ── Swap panel (Sell / Buy block) ──────────────────────────────────────────
+// Layout: label + optional rightHeader on top, big amount input + token pill
+// on the body row, USD value + balance/percent buttons in the footer.
+type SwapPanelProps = {
+  label: string;
+  token: PickerToken;
+  chain: { id: number; name: string; icon: string } | undefined;
+  amountInput: React.ReactNode;
+  usdValue?: number | undefined;
+  balance?: number | undefined;
+  balanceLoading?: boolean;
+  onPickToken: () => void;
+  onPercent?: (pct: number) => void;
+  rightHeader?: React.ReactNode;
+};
+
+function SwapPanel({
+  label,
+  token,
+  chain,
+  amountInput,
+  usdValue,
+  balance,
+  balanceLoading,
+  onPickToken,
+  onPercent,
+  rightHeader,
+}: SwapPanelProps) {
+  const showBalance = typeof balance === "number";
+  const showPercents = !!onPercent && showBalance && (balance ?? 0) > 0;
+  return (
+    <div
+      style={{
+        padding: "16px 24px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+        }}
+      >
+        <label style={{ fontSize: 12, color: VS.textMuted, fontWeight: 500 }}>
+          {label}
+        </label>
+        {rightHeader}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>{amountInput}</div>
+        <TokenPill token={token} chain={chain} onClick={onPickToken} />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          fontSize: 12,
+          color: VS.textMuted,
+          minHeight: 20,
+        }}
+      >
+        <span style={{ fontVariantNumeric: "tabular-nums" }}>
+          {typeof usdValue === "number" ? formatUsd(usdValue) : "$0.00"}
+        </span>
+        {showBalance ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontVariantNumeric: "tabular-nums" }}>
+              Balance: {formatAmount(balance)}
+            </span>
+            {showPercents && (
+              <>
+                <PercentButton onClick={() => onPercent?.(0.2)}>20%</PercentButton>
+                <PercentButton onClick={() => onPercent?.(0.5)}>50%</PercentButton>
+                <PercentButton onClick={() => onPercent?.(1)}>MAX</PercentButton>
+              </>
+            )}
+          </div>
+        ) : balanceLoading ? (
+          <span style={{ color: VS.textDim }}>Loading balances…</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function PercentButton({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: "transparent",
+        border: `1px solid ${VS.border}`,
+        borderRadius: 999,
+        color: VS.textMuted,
+        fontSize: 11,
+        fontWeight: 700,
+        padding: "2px 8px",
+        cursor: "pointer",
+        letterSpacing: 0.4,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = VS.borderStrong;
+        e.currentTarget.style.color = VS.text;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = VS.border;
+        e.currentTarget.style.color = VS.textMuted;
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+// ── Compact token pill ─────────────────────────────────────────────────────
+// Auto-width pill placed beside the amount input. Shows token icon (with
+// chain badge), ticker, chain name, and a chevron. Click → opens picker.
+function TokenPill({
+  token,
+  chain,
+  onClick,
+}: {
+  token: PickerToken;
+  chain: { id: number; name: string; icon: string } | undefined;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 10px 6px 8px",
+        background: VS.surface2,
+        border: `1px solid ${VS.border}`,
+        borderRadius: 999,
+        color: VS.text,
+        cursor: "pointer",
+        textAlign: "left",
+        flexShrink: 0,
+        transition: "border-color 150ms ease",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = VS.borderStrong;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = VS.border;
+      }}
+    >
+      <TokenIcon
+        token={token}
+        chain={chain ? { ...chain, ticker: chain.name } : undefined}
+        size={26}
+      />
+      <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.1 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: -0.2 }}>
+          {token.ticker}
+        </span>
+        <span style={{ fontSize: 10, color: VS.textMuted, marginTop: 2 }}>
+          {chain?.name ?? `Chain ${token.chain_id}`}
+        </span>
+      </span>
+      <span style={{ color: VS.textMuted, fontSize: 12, marginLeft: 4 }} aria-hidden>
+        ▾
+      </span>
+    </button>
+  );
+}
+
+// ── Read-only output amount ────────────────────────────────────────────────
+// Renders the destination amount in the To panel. Shimmer when loading and
+// no prior value, big tabular display otherwise.
+function ReadOnlyAmount({
+  value,
+  loading,
+}: {
+  value: number | undefined;
+  loading: boolean;
+}) {
+  if (loading && (value === undefined || value === 0)) {
+    return (
+      <div
+        style={{
+          height: 38,
+          width: "60%",
+          background: `linear-gradient(90deg, ${VS.surface2}, ${VS.border}, ${VS.surface2})`,
+          backgroundSize: "200% 100%",
+          borderRadius: 8,
+          animation: "vs-shimmer 1.4s ease-in-out infinite",
+        }}
+        aria-busy
+      />
+    );
+  }
+  return (
+    <div
+      style={{
+        fontSize: 32,
+        fontWeight: 700,
+        color: value ? VS.text : VS.textDim,
+        letterSpacing: -0.8,
+        fontVariantNumeric: "tabular-nums",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {value ? formatAmount(value) : "0"}
     </div>
   );
 }

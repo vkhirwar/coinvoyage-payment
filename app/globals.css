@@ -10,6 +10,10 @@
   --pink-primary: #ff0033;
 }
 
+/* Vaporswap dark/light palette lives in app/theme-vars.css (imported in
+ * layout.tsx) — kept out of this file because Tailwind v4's @theme inline
+ * directive strips [data-theme] attribute selectors from the same file. */
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -57,4 +61,43 @@ select {
 [data-radix-portal],
 .coinvoyage-modal {
   z-index: 99999 !important;
+}
+
+/* Spinner animation used by the wallet sidebar refresh button. */
+@keyframes vs-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Shimmer used by the read-only output amount placeholder. */
+@keyframes vs-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* Hide the wallet sidebar on narrow viewports — it'd squeeze the swap card.
+ * Mobile users still see balances via the in-card "Balance: X" affordance. */
+@media (max-width: 1100px) {
+  .vs-wallet-sidebar {
+    display: none !important;
+  }
+}
+
+/* Respect reduced-motion preferences for our custom animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

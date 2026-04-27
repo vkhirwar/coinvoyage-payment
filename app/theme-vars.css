@@ -1,0 +1,90 @@
+/* Vaporswap theme variables.
+ *
+ * Kept in a separate stylesheet (imported AFTER globals.css in layout.tsx) so
+ * Tailwind v4's `@theme inline` directive doesn't strip the [data-theme]
+ * attribute selectors.
+ */
+
+:root {
+  /* Vaporswap palette — dark (default). */
+  --vs-bg: #07070b;
+  --vs-surface: #0f0f15;
+  --vs-surface-2: #14141c;
+  --vs-border: #1e1e28;
+  --vs-border-strong: #2a2a38;
+  --vs-text: #f5f5fa;
+  --vs-text-muted: #8a8aa0;
+  --vs-text-dim: #4a4a5c;
+  --vs-accent: #7c5cff;
+  --vs-accent-2: #4fd1ff;
+  --vs-accent-3: #ff5cf1;
+  --vs-success: #22d39a;
+  --vs-warning: #f5a524;
+  --vs-danger: #ff5c7a;
+  --vs-gradient: linear-gradient(135deg, #7c5cff 0%, #4fd1ff 50%, #ff5cf1 100%);
+  --vs-gradient-soft: linear-gradient(
+    135deg,
+    rgba(124, 92, 255, 0.18) 0%,
+    rgba(79, 209, 255, 0.12) 50%,
+    rgba(255, 92, 241, 0.18) 100%
+  );
+  --vs-glass-bg: rgba(7, 7, 11, 0.72);
+  --vs-overlay: rgba(4, 4, 8, 0.72);
+  --vs-shadow: 0 30px 80px -40px rgba(124, 92, 255, 0.6),
+    0 10px 40px -20px rgba(79, 209, 255, 0.25);
+}
+
+html[data-theme="light"] {
+  /* Legacy aliases — flip for light surfaces. */
+  --background: #f7f7fb;
+  --foreground: #0a0a14;
+  --card-bg: #ffffff;
+  --input-bg: #ffffff;
+  --border-color: #6c4cff;
+  --text-muted: #6b7280;
+  --pink-primary: #6c4cff;
+
+  /* Vaporswap palette — light. */
+  --vs-bg: #f7f7fb;
+  --vs-surface: #ffffff;
+  --vs-surface-2: #f1f1f6;
+  --vs-border: #e5e5ee;
+  --vs-border-strong: #d4d4e0;
+  --vs-text: #0a0a14;
+  --vs-text-muted: #5a5a6c;
+  --vs-text-dim: #9a9aac;
+  --vs-accent: #6c4cff;
+  --vs-accent-2: #2bb8e6;
+  --vs-accent-3: #d44cd0;
+  --vs-success: #18b386;
+  --vs-warning: #d99318;
+  --vs-danger: #e0556e;
+  --vs-gradient: linear-gradient(135deg, #6c4cff 0%, #2bb8e6 50%, #d44cd0 100%);
+  --vs-gradient-soft: linear-gradient(
+    135deg,
+    rgba(108, 76, 255, 0.10) 0%,
+    rgba(43, 184, 230, 0.08) 50%,
+    rgba(212, 76, 208, 0.10) 100%
+  );
+  --vs-glass-bg: rgba(255, 255, 255, 0.78);
+  --vs-overlay: rgba(20, 20, 30, 0.45);
+  --vs-shadow: 0 30px 80px -40px rgba(108, 76, 255, 0.35),
+    0 10px 40px -20px rgba(43, 184, 230, 0.18);
+}
+
+/* Light-mode tweaks for the legacy <input>/<select> styles in globals.css.
+ * Override the dark-only border/color literals so form fields don't look
+ * like dark holes on a light surface. */
+html[data-theme="light"] input,
+html[data-theme="light"] select {
+  border-color: #d4d4e0;
+  color: #0a0a14;
+}
+html[data-theme="light"] input::placeholder {
+  color: #9a9aac;
+}
+html[data-theme="light"] input:focus,
+html[data-theme="light"] select:focus {
+  border-color: #6c4cff;
+  box-shadow: 0 0 10px rgba(108, 76, 255, 0.25);
+}
