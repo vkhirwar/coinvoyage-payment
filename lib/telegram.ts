@@ -52,6 +52,22 @@ export function escapeMarkdownV2(s: string): string {
   return s.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (c) => `\\${c}`);
 }
 
+export function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function answerCallbackQuery(callbackQueryId: string, text?: string) {
+  return call<unknown>("answerCallbackQuery", { callback_query_id: callbackQueryId, text });
+}
+
+export function setWebhook(url: string, secret_token: string, allowed_updates?: string[]) {
+  return call<unknown>("setWebhook", { url, secret_token, allowed_updates });
+}
+
+export function getWebhookInfo() {
+  return call<{ url: string; pending_update_count: number; last_error_message?: string }>("getWebhookInfo", {});
+}
+
 export function qrUrl(data: string, size = 400): string {
   return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}`;
 }
