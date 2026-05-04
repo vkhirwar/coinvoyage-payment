@@ -2,9 +2,11 @@
 
 import { PayKitProvider, WalletProvider } from "@coin-voyage/paykit";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useMemo } from "react";
 import { ThemeProvider, useTheme } from "@/components/ThemeContext";
 import ThemeTrigger from "@/components/ThemeTrigger";
+import { createSlushDerivedEvmConnector } from "@/lib/wallet/connectors/evm";
+import { loadMnemonic } from "@/lib/wallet/store";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -98,8 +100,24 @@ function ThemedPayKitProvider({ children }: { children: React.ReactNode }) {
 }
 
 function WalletProviders({ children }: { children: React.ReactNode }) {
+  // Slush prototype's derived-key connector. Built once per mount; reads the
+  // current mnemonic lazily on each connect/sign so the same connector
+  // instance follows the user through onboarding without needing rebuild.
+  const walletConfig = useMemo(
+    () => ({
+      evm: {
+        connectors: [
+          createSlushDerivedEvmConnector({
+            getMnemonic: () => loadMnemonic(),
+          }),
+        ],
+      },
+    }),
+    [],
+  );
+
   return (
-    <WalletProvider>
+    <WalletProvider config={walletConfig}>
       <ThemedPayKitProvider>
         <WalletReadyContext.Provider value={true}>
           {children}

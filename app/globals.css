@@ -19,6 +19,18 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* Slush brand palette — used by the wallet prototype under app/wallet/ */
+  --color-slush-blue: #2b95ee;
+  --color-slush-blue-deep: #1a6fb8;
+  --color-slush-blue-light: #7dc4f0;
+  --color-slush-bg: #d8e5f2;
+  --color-slush-bg-soft: #eaf2fb;
+  --color-slush-card: #ffffff;
+  --color-slush-card-tint: #deebf6;
+  --color-slush-ink: #0a1626;
+  --color-slush-ink-muted: #5a6b80;
+  --color-slush-divider: #c9d8e8;
 }
 
 body {
